@@ -139,6 +139,42 @@ def run_consolidated_optimizer():
     if enriched is not None and len(enriched) == len(df):
         # Use enriched version if it matches the upload size (no extra rows from DB)
         df = enriched
+    
+    # =====================================================
+    # DATE RANGE FILTER: Default to last 30 days
+    # =====================================================
+    date_cols = ["Date", "Start Date", "date", "Report Date", "start_date"]
+    date_col = None
+    for col in date_cols:
+        if col in df.columns:
+            date_col = col
+            break
+    
+    if date_col:
+        from datetime import datetime, timedelta
+        df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+        
+        min_date = df[date_col].min()
+        max_date = df[date_col].max()
+        
+        # Default: last 30 days from max date in data
+        default_start = max(min_date, max_date - timedelta(days=30))
+        
+        with st.expander("📅 Date Range", expanded=False):
+            col_a, col_b = st.columns(2)
+            with col_a:
+                start_date = st.date_input("Start Date", value=default_start.date(), 
+                                            min_value=min_date.date(), max_value=max_date.date(),
+                                            key="opt_date_start")
+            with col_b:
+                end_date = st.date_input("End Date", value=max_date.date(),
+                                          min_value=min_date.date(), max_value=max_date.date(),
+                                          key="opt_date_end")
+        
+        # Filter data to selected range
+        df = df[(df[date_col].dt.date >= start_date) & (df[date_col].dt.date <= end_date)]
+        days_selected = (end_date - start_date).days + 1
+        st.caption(f"📆 Analyzing **{days_selected} days** ({start_date.strftime('%b %d')} - {end_date.strftime('%b %d')}) | {len(df):,} rows")
         
     # Helper to calculate summary metrics early for Header
     if "Spend" in df.columns and "Sales" in df.columns:
