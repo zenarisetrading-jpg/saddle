@@ -1312,9 +1312,15 @@ class DatabaseManager:
             attributed_delta_sales = (account_delta_sales * spend_weight) / num_actions_for_target
             attributed_delta_spend = (account_delta_spend * spend_weight) / num_actions_for_target
             
-            # Impact score based on ATTRIBUTED (prorated) values
+            # STEP 5: Winner/Loser Evaluation (Hybrid Logic)
+            # ==========================================
+            # USE INDIVIDUAL (RAW) performance for the Winner/Loser status
+            # This ensures individual keyword failure is correctly identified
+            raw_impact = delta_sales - delta_spend
+            is_winner = raw_impact > 0 if (before_spend > 0 or after_spend > 0) else None
+            
+            # Use ATTRIBUTED (prorated) values for global sums and scoring
             impact_score = attributed_delta_sales - attributed_delta_spend
-            is_winner = impact_score > 0 if before_spend > 0 else None  # Can't determine if no spend
             
             # Calculate ROAS
             before_roas = before_sales / before_spend if before_spend > 0 else 0
