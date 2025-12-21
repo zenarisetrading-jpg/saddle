@@ -1208,14 +1208,37 @@ class DatabaseManager:
                 actions_df[col] = None
             return actions_df
         
-        # BEFORE period = weeks with actions
-        before_start = action_weeks[0].start_time
-        before_end = action_weeks[-1].end_time
-        
-        # AFTER period = same number of weeks immediately after
+        # Determine the target "After" window (weeks following actions)
         num_action_weeks = len(action_weeks)
-        after_start = before_end + pd.Timedelta(days=1)
-        after_end = after_start + pd.Timedelta(weeks=num_action_weeks) - pd.Timedelta(days=1)
+        
+        # Split date is the day AFTER the last action week ends
+        # Using .ceil('D') or .date() to ensure we start at 00:00:00
+        after_start_date = (action_weeks[-1].end_time + pd.Timedelta(seconds=1)).date()
+        after_start = pd.Timestamp(after_start_date)
+        
+        # Identify max available data date
+        max_stats_date = pd.Timestamp(stats_df['start_date_parsed'].max())
+        
+        # Normal end would be +X weeks
+        raw_after_end = after_start + pd.Timedelta(weeks=num_action_weeks) - pd.Timedelta(days=1)
+        
+        # Clip AFTER period to available data
+        after_end = min(raw_after_end, max_stats_date)
+        
+        # Calculate actual duration of the "After" window
+        num_days = (after_end - after_start).days + 1
+        
+        if num_days <= 0:
+            # No data in "After" period yet - return actions with None impact
+            for col in ['before_spend', 'after_spend', 'before_sales', 'after_sales',
+                       'delta_spend', 'delta_sales', 'attributed_delta_sales', 
+                       'attributed_delta_spend', 'impact_score', 'is_winner']:
+                actions_df[col] = None
+            return actions_df
+            
+        # Re-align BEFORE period to match the length of AFTER period exactly
+        before_end = after_start - pd.Timedelta(days=1)
+        before_start = before_end - pd.Timedelta(days=num_days - 1)
         
         # ==========================================
         # STEP 2: Calculate ACCOUNT-LEVEL totals
