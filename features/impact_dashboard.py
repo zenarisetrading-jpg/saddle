@@ -635,11 +635,36 @@ def _render_drill_down_table(impact_df: pd.DataFrame, show_migration_badge: bool
                     lambda x: f"${x:,.2f}" if pd.notna(x) else "-"
                 )
         
-        # Format is_winner
+        # Format is_winner mapping to be more descriptive
         if 'is_winner' in display_df.columns:
-            display_df['is_winner'] = display_df['is_winner'].apply(
-                lambda x: "📈 Positive Impact" if x else "➖ No Measurable Impact" if pd.notna(x) else "-"
-            )
+            def format_result(row):
+                val = row['is_winner']
+                if pd.isna(val) or val is None: return "-"
+                
+                # Check raw performance for labeling
+                # We use raw delta_sales/spend from the original impact_df if available
+                # or just use the is_winner boolean if it's already calculated correctly
+                if val == True:
+                    return "📈 Positive Impact"
+                
+                # If we're here, is_winner is False. 
+                # We need to distinguish between "Negative Impact" and "No Change"
+                # Using the raw delta_sales and delta_spend before being formatted to strings
+                dsales = row['_delta_sales_raw']
+                dspend = row['_delta_spend_raw']
+                
+                if abs(dsales) < 0.01 and abs(dspend) < 0.01:
+                    return "➖ No Measurable Impact"
+                return "📉 Negative Impact"
+
+            # Create temporary raw columns for logic
+            display_df['_delta_sales_raw'] = impact_df.loc[display_df.index, 'delta_sales'].fillna(0)
+            display_df['_delta_spend_raw'] = impact_df.loc[display_df.index, 'delta_spend'].fillna(0)
+            
+            display_df['is_winner'] = display_df.apply(format_result, axis=1)
+            
+            # Drop temporary columns
+            display_df = display_df.drop(columns=['_delta_sales_raw', '_delta_spend_raw'])
         
         # Rename columns for display
         display_df = display_df.rename(columns={
