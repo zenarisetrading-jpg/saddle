@@ -214,8 +214,13 @@ def render_impact_dashboard():
     
     # Calculate active-only summary metrics
     if not active_df.empty:
-        delta_sales = active_df['delta_sales'].fillna(0)
-        delta_spend = active_df['delta_spend'].fillna(0)
+        # Use attributed deltas to fix double-counting inflation
+        # These columns were added in db_manager.get_action_impact
+        sales_col = 'attributed_delta_sales' if 'attributed_delta_sales' in active_df.columns else 'delta_sales'
+        spend_col = 'attributed_delta_spend' if 'attributed_delta_spend' in active_df.columns else 'delta_spend'
+        
+        delta_sales = active_df[sales_col].fillna(0)
+        delta_spend = active_df[spend_col].fillna(0)
         is_winner = active_df['is_winner'].fillna(False)
         
         # Build by_action_type with correct nested structure
@@ -223,8 +228,8 @@ def render_impact_dashboard():
         for action_type in active_df['action_type'].unique():
             action_data = active_df[active_df['action_type'] == action_type]
             by_action_type[action_type] = {
-                'net_sales': action_data['delta_sales'].fillna(0).sum(),
-                'net_spend': action_data['delta_spend'].fillna(0).sum()
+                'net_sales': action_data[sales_col].fillna(0).sum(),
+                'net_spend': action_data[spend_col].fillna(0).sum()
             }
         
         active_summary = {
@@ -776,16 +781,19 @@ def get_recent_impact_summary() -> Optional[dict]:
         if active_df.empty:
             return None
         
-        # Calculate exactly like Impact tab (lines 192-212)
-        delta_sales = active_df['delta_sales'].fillna(0)
-        delta_spend = active_df['delta_spend'].fillna(0)
+        # Calculate exactly like Impact tab using attributed columns to fix inflation
+        sales_col = 'attributed_delta_sales' if 'attributed_delta_sales' in active_df.columns else 'delta_sales'
+        spend_col = 'attributed_delta_spend' if 'attributed_delta_spend' in active_df.columns else 'delta_spend'
+        
+        delta_sales = active_df[sales_col].fillna(0)
+        delta_spend = active_df[spend_col].fillna(0)
         is_winner = active_df['is_winner'].fillna(False)
         active_count = len(active_df)
         
         # Find top action type by net impact
         top_action_type = None
         if 'action_type' in active_df.columns:
-            by_type = active_df.groupby('action_type')['delta_sales'].sum()
+            by_type = active_df.groupby('action_type')[sales_col].sum()
             if not by_type.empty:
                 top_action_type = by_type.idxmax()
         
