@@ -635,11 +635,24 @@ class DatabaseManager:
             return 0
         
         # Identify target column
+        # CRITICAL: For auto campaigns, use "Targeting" column (close-match, loose-match, etc.)
+        # NOT "Customer Search Term" (which has ASINs/search queries)
         target_col = None
-        for col in ['Customer Search Term', 'Targeting', 'Keyword Text']:
-            if col in df.columns:
-                target_col = col
-                break
+        
+        # Check if we have auto campaigns
+        has_auto = False
+        if 'Match Type' in df.columns:
+            has_auto = df['Match Type'].astype(str).str.lower().isin(['auto', '-']).any()
+        
+        if has_auto and 'Targeting' in df.columns:
+            # For auto campaigns, prioritize Targeting column
+            target_col = 'Targeting'
+        else:
+            # For other campaigns, look for these columns in order
+            for col in ['Customer Search Term', 'Targeting', 'Keyword Text']:
+                if col in df.columns:
+                    target_col = col
+                    break
         
         if target_col is None:
             return 0
@@ -669,6 +682,25 @@ class DatabaseManager:
         
         # Create working copy
         df_copy = df.copy()
+        
+        # ==========================================
+        # DUAL COLUMN HANDLING: Targeting + CST
+        # ==========================================
+        # For bid optimization: Use "Targeting" column (targeting types like close-match, substitutes)
+        # For harvest: Use "Customer Search Term" column (actual user search queries)
+        
+        # Determine which column to use for target_text (bid optimization)
+        if 'Targeting' in df_copy.columns:
+            target_col = 'Targeting'
+        elif 'Customer Search Term' in df_copy.columns:
+            target_col = 'Customer Search Term'
+        elif 'Keyword Text' in df_copy.columns:
+            target_col = 'Keyword Text'
+        else:
+            return 0
+        
+        # Determine CST column (for harvest)
+        cst_col = 'Customer Search Term' if 'Customer Search Term' in df_copy.columns else None
         
         # ==========================================
         # WEEKLY SPLITTING LOGIC
@@ -716,6 +748,11 @@ class DatabaseManager:
         df_copy['_ag_norm'] = df_copy['Ad Group Name'].astype(str).str.lower().str.strip()
         df_copy['_target_norm'] = df_copy[target_col].astype(str).str.lower().str.strip()
         
+        # Create CST norm column (for harvest - keep one representative CST per group)
+        if cst_col:
+            df_copy['_cst_norm'] = df_copy[cst_col].astype(str).str.lower().str.strip()
+            agg_cols['_cst_norm'] = 'first'  # Keep first CST for each targeting group
+        
         total_saved = 0
         
         # Process each week separately
@@ -744,12 +781,13 @@ class DatabaseManager:
                 for _, row in grouped.iterrows():
                     # Use the pre-normalized columns from groupby
                     match_type_norm = str(row.get('Match Type', '')).lower().strip()
+                    cst_value = row.get('_cst_norm', '') if cst_col else ''
                     
                     cursor.execute("""
                         INSERT OR REPLACE INTO target_stats 
                         (client_id, start_date, campaign_name, ad_group_name, target_text, 
-                         match_type, spend, sales, orders, clicks, impressions, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                         match_type, spend, sales, orders, clicks, impressions, customer_search_term, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """, (
                         client_id,
                         week_start_str,
@@ -761,7 +799,8 @@ class DatabaseManager:
                         float(row.get('Sales', 0) or 0),
                         int(row.get('Orders', 0) or 0),
                         int(row.get('Clicks', 0) or 0),
-                        int(row.get('Impressions', 0) or 0)
+                        int(row.get('Impressions', 0) or 0),
+                        cst_value
                     ))
                 
                 total_saved += len(grouped)

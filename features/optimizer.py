@@ -896,22 +896,42 @@ def calculate_bid_optimizations(
             return True
         return False
     
+    def is_category_targeting(targeting_val):
+        t = str(targeting_val).lower().strip()
+        return t.startswith("category=") or (t.startswith("category") and "=" in t)
+    
     # 3. Build mutually exclusive bucket masks
-    mask_auto_by_targeting = df_clean["Targeting"].apply(is_auto_or_category)
+    # CRITICAL: Auto bucket should ONLY include genuine auto targeting types (close-match, loose-match, etc.)
+    # NOT asin-expanded or category targets, even if match_type is "auto" or "-"
+    
+    # First identify PT and Category targets (takes precedence)
+    mask_pt_targeting = df_clean["Targeting"].apply(is_pt_targeting)
+    mask_category_targeting = df_clean["Targeting"].apply(is_category_targeting)
+    
+    # Auto bucket: targeting type is in AUTO_TYPES AND NOT a PT/Category target
+    mask_auto_by_targeting = df_clean["Targeting"].apply(lambda x: str(x).lower().strip() in AUTO_TYPES)
     mask_auto_by_matchtype = df_clean["Match Type"].str.lower().isin(["auto", "-"])
-    mask_auto = mask_auto_by_targeting | mask_auto_by_matchtype
+    mask_auto = (mask_auto_by_targeting | mask_auto_by_matchtype) & (~mask_pt_targeting) & (~mask_category_targeting)
     
-    mask_pt = df_clean["Targeting"].apply(is_pt_targeting) & (~mask_auto)
+    # PT bucket: PT targeting AND not auto
+    mask_pt = mask_pt_targeting & (~mask_auto)
     
+    # Category bucket: Category targeting AND not auto/PT
+    mask_category = mask_category_targeting & (~mask_auto) & (~mask_pt)
+    
+    # Exact bucket: Match Type is exact AND not PT/Category/Auto
     mask_exact = (
         (df_clean["Match Type"].str.lower() == "exact") & 
         (~mask_pt) & 
+        (~mask_category) &
         (~mask_auto)
     )
     
+    # Broad/Phrase bucket: Match Type is broad/phrase AND not PT/Category/Auto
     mask_broad_phrase = (
         df_clean["Match Type"].str.lower().isin(["broad", "phrase"]) & 
         (~mask_pt) & 
+        (~mask_category) &
         (~mask_auto)
     )
     
@@ -933,10 +953,18 @@ def calculate_bid_optimizations(
     
     bids_auto = _process_bucket(df_clean[mask_auto], config, 
                                  min_clicks=config.get("MIN_CLICKS_AUTO", 10), 
-                                 bucket_name="Auto/Category",
+                                 bucket_name="Auto",
                                  universal_median_roas=universal_median_roas)
     
-    return bids_exact, bids_pt, bids_agg, bids_auto
+    bids_category = _process_bucket(df_clean[mask_category], config, 
+                                     min_clicks=config.get("MIN_CLICKS_CATEGORY", 10), 
+                                     bucket_name="Category",
+                                     universal_median_roas=universal_median_roas)
+    
+    # Combine auto and category for backwards compatibility (displayed as "Auto/Category")
+    bids_auto_combined = pd.concat([bids_auto, bids_category], ignore_index=True) if not bids_category.empty else bids_auto
+    
+    return bids_exact, bids_pt, bids_agg, bids_auto_combined
 
 def _process_bucket(segment_df: pd.DataFrame, config: dict, min_clicks: int, bucket_name: str, universal_median_roas: float) -> pd.DataFrame:
     """Unified bucket processor with Bucket Median ROAS classification."""
@@ -949,12 +977,22 @@ def _process_bucket(segment_df: pd.DataFrame, config: dict, min_clicks: int, buc
     has_keyword_id = "KeywordId" in segment_df.columns and segment_df["KeywordId"].notna().any()
     has_targeting_id = "TargetingId" in segment_df.columns and segment_df["TargetingId"].notna().any()
     
-    if has_keyword_id or has_targeting_id:
+    # CRITICAL FIX: For Auto/Category campaigns, group by Targeting TYPE (from Targeting column)
+    # NOT by TargetingId, which contains individual ASIN IDs that can't be bid-adjusted
+    is_auto_bucket = bucket_name in ["Auto/Category", "Auto", "Category"]
+    
+    if is_auto_bucket:
+        # For auto campaigns: Use the Targeting column value (close-match, loose-match, substitutes, complements)
+        # This preserves targeting type while avoiding individual ASIN grouping
+        segment_df["_group_key"] = segment_df["_targeting_norm"]
+    elif has_keyword_id or has_targeting_id:
+        # For keywords/PT: use IDs for grouping
         segment_df["_group_key"] = segment_df.apply(
             lambda r: str(r.get("KeywordId") or r.get("TargetingId") or r["_targeting_norm"]).strip(),
             axis=1
         )
     else:
+        # Fallback: use normalized targeting text
         segment_df["_group_key"] = segment_df["_targeting_norm"]
     
     agg_cols = {"Clicks": "sum", "Spend": "sum", "Sales": "sum", "Impressions": "sum", "Orders": "sum"}
@@ -971,6 +1009,13 @@ def _process_bucket(segment_df: pd.DataFrame, config: dict, min_clicks: int, buc
     grouped = segment_df.groupby(["Campaign Name", "Ad Group Name", "_group_key"], as_index=False).agg({**agg_cols, **meta_cols})
     grouped = grouped.drop(columns=["_group_key"], errors="ignore")
     grouped["ROAS"] = np.where(grouped["Spend"] > 0, grouped["Sales"] / grouped["Spend"], 0)
+    
+    # Post-aggregation cleanup for auto campaigns
+    if is_auto_bucket:
+        # Clear TargetingId to prevent individual ASIN IDs from appearing in bulk file
+        # The Targeting column already has the correct targeting type (close-match, loose-match, etc.)
+        if "TargetingId" in grouped.columns:
+            grouped["TargetingId"] = ""
     
     # Calculate bucket ROAS using spend-weighted average (Total Sales / Total Spend)
     # This matches actual bucket performance, not skewed by many 0-sale rows
@@ -1534,6 +1579,7 @@ def generate_negatives_bulk(neg_kw, neg_pt):
         df["Ad Group Name"] = neg_kw["Ad Group Name"]
         df["Keyword Text"] = neg_kw["Term"]
         df["Match Type"] = "negativeExact"
+        df["Keyword Id"] = neg_kw.get("KeywordId", "")  # Map the ID
         df["State"] = "enabled"
         frames.append(df)
         
@@ -1551,6 +1597,7 @@ def generate_negatives_bulk(neg_kw, neg_pt):
         df["Ad Group Name"] = neg_pt["Ad Group Name"]
         df["Product Targeting Expression"] = neg_pt["Term"]
         df["Match Type"] = "negativeExact" # Often used for negative PT expressions too or left blank
+        df["Product Targeting Id"] = neg_pt.get("TargetingId", "")  # Map the ID
         df["State"] = "enabled"
         frames.append(df)
         
@@ -2395,13 +2442,13 @@ class OptimizerModule(BaseFeature):
         if active_tab == "Keyword Negatives":
             tab_header("Negative Keywords Identified", shield_icon)
             if not neg_kw.empty:
-                st.dataframe(neg_kw, use_container_width=True)
+                st.data_editor(neg_kw, use_container_width=True, height=400, disabled=True, hide_index=True)
             else:
                 st.info("No negative keywords found.")
         else:
             tab_header("Product Targeting Candidates", shield_icon)
             if not neg_pt.empty:
-                st.dataframe(neg_pt, use_container_width=True)
+                st.data_editor(neg_pt, use_container_width=True, height=400, disabled=True, hide_index=True)
             else:
                 st.info("No product targeting negatives found.")
 
@@ -2453,7 +2500,7 @@ class OptimizerModule(BaseFeature):
         def safe_display(df):
             if df is not None and not df.empty:
                 available_cols = [c for c in preferred_cols if c in df.columns]
-                st.dataframe(df[available_cols], use_container_width=True)
+                st.data_editor(df[available_cols], use_container_width=True, height=400, disabled=True, hide_index=True)
             else:
                 st.info("No bid adjustments needed for this bucket.")
 
@@ -2508,7 +2555,7 @@ class OptimizerModule(BaseFeature):
                     st.session_state['current_module'] = 'creator'
                     st.rerun()
             
-            st.dataframe(harvest_df, use_container_width=True)
+            st.data_editor(harvest_df, use_container_width=True, height=400, disabled=True, hide_index=True)
         else:
             st.info("No harvest candidates met the performance criteria for this period.")
 

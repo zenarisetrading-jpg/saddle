@@ -474,10 +474,14 @@ class DataHub:
                 self.clear_all()
                 return False
             
+            # CRITICAL: Map database columns correctly
+            # target_text → Targeting (for bid optimization)
+            # customer_search_term → Customer Search Term (for harvest)
             column_mapping = {
                 'campaign_name': 'Campaign Name',
                 'ad_group_name': 'Ad Group Name',
-                'target_text': 'Customer Search Term',
+                'target_text': 'Targeting',
+                'customer_search_term': 'Customer Search Term',
                 'match_type': 'Match Type',
                 'spend': 'Spend',
                 'sales': 'Sales',
@@ -489,9 +493,10 @@ class DataHub:
             
             df_renamed = df.rename(columns=column_mapping)
             
-            # CRITICAL: Also add 'Targeting' column (needed by mapping engine)
-            if 'Customer Search Term' in df_renamed.columns:
-                df_renamed['Targeting'] = df_renamed['Customer Search Term']
+            # If CST is missing or empty, fallback to Targeting for harvest
+            if 'Customer Search Term' not in df_renamed.columns or df_renamed['Customer Search Term'].isna().all():
+                if 'Targeting' in df_renamed.columns:
+                    df_renamed['Customer Search Term'] = df_renamed['Targeting']
             
             st.session_state.unified_data['search_term_report'] = df_renamed
             st.session_state.unified_data['upload_status']['search_term_report'] = True
