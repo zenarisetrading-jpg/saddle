@@ -96,11 +96,13 @@ Generates a per-AdGroup audit trail.
 
 The UI follows a "Premium Glassmorphism" aesthetic.
 
-### The Decision Hub Dashboard
+### The Decision Hub & Report Card
 Organized into three consistent rows of 5 metric cards:
 1. **📉 Financial Performance**: Spend, Sales, ROAS, ACoS, CVR. (Pinned to Header)
 2. **🎯 Optimization Summary**: Ad Groups, Search Terms, Negatives, Bids, Harvests.
-3. **🩺 Account Health**: Health Score, Waste Ratio, Wasted Spend, Current ROAS, Target ROAS.
+3. **🩺 Account Health (Report Card)**: 
+   - Uses a **3-column layout** for high-impact gauges: ROAS vs Target, Spend Efficiency, and Spend Risk.
+   - Denominators are split for transparency: **Evaluated** (Total unique targets flagged for bids) vs **Analyzed** (Total rows in the Search Term Report).
 
 ---
 
@@ -114,13 +116,23 @@ Organized into three consistent rows of 5 metric cards:
 
 ## 6. Stability & Error Handling
 
-### Date Clamping
-To prevent `StreamlitAPIException`, the application implements **Smart Clamping** during the date selection process. If a user uploads a new file with a narrower date range than the previous one, the session state is automatically "snapped" back to the valid bounds of the new data before the UI renders.
+### Date Clamping & Window Alignment
+To prevent `StreamlitAPIException` and ensure mathematical integrity:
+- **Smart Clamping**: Automatically snaps UI date sliders to the valid bounds of the uploaded dataset.
+- **Window Alignment**: Impact analysis automatically clips the "Before" and "After" comparison windows to equal lengths based on the latest available data date, preventing time-bias in growth metrics.
 
-### Empty State Handling
-Every core function follows the "Empty Return Pattern":
-```python
-if df.empty:
-    return pd.DataFrame(columns=["Campaign Name", "Ad Group Name", ...])
-```
-This ensures that the UI components (Dataframes, Metrics, Charts) always have the expected schema to render, avoiding "Gray Screen of Death" crashes.
+---
+
+## 7. Impact Analysis Logic (`features/impact_dashboard.py`)
+
+The Impact Dashboard uses a **Prorated Historical Model** to avoid the common "Inflation Trap" of multi-attribution.
+
+### The Problem: Multi-Attribution Inflation
+If a target is paused, an optimizer might claim 100% of its historical sales as a "Saving". If 10 targets are paused in the same ad group, the optimizer might claim 10x the actual ad group spend.
+
+### The Solution: Account-Level Proration
+1. **Ground Truth**: Calculate the absolute AED change at the Account level (Total Sales After - Total Sales Before).
+2. **Weighted Attribution**: Distribute this AED delta to individual actions based on their **Spend Weight** during the "Before" period.
+3. **Hybrid Verification**:
+   - **Financials**: Use prorated `AED` values for all totals and waterfall charts.
+   - **Winner/Loser Status**: Evaluate based on **Individual Target Performance**. If a specific target's sales dropped more than the account average, it is marked as a "Loser" regardless of overall account growth.

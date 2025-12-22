@@ -35,13 +35,14 @@ We implement a "Winner-Takes-All" isolation model.
 
 ## 3. Bid Optimization Logic
 
-We use a "V-Next Bucketed" logic to adjust bids proportionally based on performance deviations from the median.
-
-### The Alpha Factor
-We use an `Alpha` coefficient (default: 0.15) to moderate bid changes. This prevents massive swings in bids that could destabilize the Amazon algorithm.
+### Bid Baseline Selection
+To ensure stability and respect account structure:
+- **Ad Group Default Bid**: Used as the primary baseline for bid adjustments where specific keyword-level bids are missing or undefined.
+- **Current Bid**: Used for individual targets with existing granular overrides.
+- **Safety Floor**: A hard floor of **AED 0.30** is applied to all recommendations to ensure viability on the Amazon marketplace.
 
 ### Formula:
-`New_Bid = Current_Bid * [1 + (ROAS_Deviation * Alpha)]`
+`New_Bid = Baseline_Bid * [1 + (ROAS_Deviation * Alpha)]`
 
 Where `ROAS_Deviation` is `(Row_ROAS / Baseline_ROAS) - 1`.
 
@@ -77,3 +78,25 @@ Our simulator uses a **Curved Elasticity Model** to project the outcome of recom
 - **Conservative**: High bid skepticism, lower click growth.
 - **Expected**: Balanced historical averages.
 - **Aggressive**: High confidence in harvest efficiency.
+
+---
+
+## 6. Verified Impact Methodology (Account Proration)
+
+To prevent the "Inflation of Success" common in many ad optimizers, we use a **Prorated Attribution Model** for all historical impact calculations.
+
+### 1. Ground Truth (Account Delta)
+We first establish the absolute performance change of the entire account during the comparison window:
+$$\Delta Sales_{Account} = \sum Sales_{After} - \sum Sales_{Before}$$
+
+### 2. Weighted Proration
+The total account delta is then distributed to individual optimized targets based on their **Spend Weight** during the "Before" period:
+$$Attributed\Delta_{Target} = \Delta Sales_{Account} \times \left( \frac{Spend_{Target, Before}}{Spend_{Account, Before}} \right)$$
+
+*Reasoning*: This ensures that the sum of all individual "Impact" AED values in the dashboard perfectly matches the true account-level growth, preventing double-counting of overlapping search term sales.
+
+### 3. Hybrid Evaluation (The "Honesty" Check)
+While financial impact is prorated, the **Status (Winner/Loser)** is evaluated at the granular target level:
+- **Winner**: If `Target_ROAS_After > Target_ROAS_Before` (or Sales improvement).
+- **Loser**: If performance dropped, regardless of whether the account as a whole grew.
+- This ensures users can still identify specific keywords that are failing, even if the overall account is trending up.

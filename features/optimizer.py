@@ -37,6 +37,15 @@ from utils.matchers import ExactMatcher
 from ui.components import metric_card
 import plotly.graph_objects as go
 
+# Validation Architecture
+from bulk_validation_spec import (
+    OptimizationRecommendation,
+    RecommendationType,
+    validate_recommendation,
+    ValidationResult
+)
+
+
 # ==========================================
 # CONSTANTS
 # ==========================================
@@ -599,7 +608,7 @@ def identify_negative_candidates(
         # Aggregate logic for Isolation Negatives (Fix for "metrics broken down by date")
         if not isolation_df.empty:
             agg_cols = {"Clicks": "sum", "Spend": "sum"}
-            meta_cols = {c: "first" for c in ["CampaignId", "AdGroupId"] if c in isolation_df.columns}
+            meta_cols = {c: "first" for c in ["CampaignId", "AdGroupId", "Campaign Targeting Type"] if c in isolation_df.columns}
             
             isolation_agg = isolation_df.groupby(
                 ["Campaign Name", "Ad Group Name", "Customer Search Term"], as_index=False
@@ -626,6 +635,21 @@ def identify_negative_candidates(
                     continue
                 seen_keys.add(key)
                 
+                
+                # Create recommendation object for validation
+                rec = OptimizationRecommendation(
+                    recommendation_id=f"iso_{campaign}_{term}",
+                    recommendation_type=RecommendationType.NEGATIVE_ISOLATION,
+                    campaign_name=campaign,
+                    campaign_id=row.get("CampaignId", ""),
+                    campaign_targeting_type=row.get("Campaign Targeting Type", "Manual"),
+                    ad_group_name=None, # Isolation is campaign-level
+                    keyword_text=term,
+                    match_type="campaign negative exact",
+                    currency=config.get("currency", "AED")
+                )
+                rec.validation_result = validate_recommendation(rec)
+                
                 negatives.append({
                     "Type": "Isolation",
                     "Campaign Name": campaign,
@@ -636,6 +660,7 @@ def identify_negative_candidates(
                     "Spend": row["Spend"],
                     "CampaignId": row.get("CampaignId", ""),
                     "AdGroupId": row.get("AdGroupId", ""),
+                    "recommendation": rec # Store for UI and Export
                 })
     
     # Stage 2: Performance negatives (bleeders) - CVR-BASED THRESHOLDS
@@ -646,7 +671,7 @@ def identify_negative_candidates(
     if not bleeders.empty:
         # Aggregate by campaign + ad group + term
         agg_cols = {"Clicks": "sum", "Spend": "sum", "Impressions": "sum", "Sales": "sum"}
-        meta_cols = {c: "first" for c in ["CampaignId", "AdGroupId"] if c in bleeders.columns}
+        meta_cols = {c: "first" for c in ["CampaignId", "AdGroupId", "Campaign Targeting Type"] if c in bleeders.columns}
         
         bleeder_agg = bleeders.groupby(
             ["Campaign Name", "Ad Group Name", "Customer Search Term"], as_index=False
@@ -673,6 +698,22 @@ def identify_negative_candidates(
             
             # Use CVR-based hard stop threshold
             reason = "Hard Stop" if row["Clicks"] >= hard_stop_threshold else "Performance"
+            
+            # Create recommendation object for validation
+            rec = OptimizationRecommendation(
+                recommendation_id=f"bld_{campaign}_{ad_group}_{term}",
+                recommendation_type=RecommendationType.NEGATIVE_BLEEDER,
+                campaign_name=campaign,
+                campaign_id=row.get("CampaignId", ""),
+                campaign_targeting_type=row.get("Campaign Targeting Type", "Manual"),
+                ad_group_name=ad_group,
+                ad_group_id=row.get("AdGroupId", ""),
+                keyword_text=term,
+                match_type="negative exact",
+                currency=config.get("currency", "AED")
+            )
+            rec.validation_result = validate_recommendation(rec)
+            
             negatives.append({
                 "Type": f"Bleeder ({reason})",
                 "Campaign Name": campaign,
@@ -683,6 +724,7 @@ def identify_negative_candidates(
                 "Spend": row["Spend"],
                 "CampaignId": row.get("CampaignId", ""),
                 "AdGroupId": row.get("AdGroupId", ""),
+                "recommendation": rec # Store for UI and Export
             })
     
     # Stage 3: ASIN Mapper Integration
@@ -812,6 +854,25 @@ def identify_negative_candidates(
         # Cleanup
         neg_df.drop(columns=['_camp_norm', '_ag_norm', '_term_norm', 'KeywordId_fallback', 'TargetingId_fallback', 
                              'KeywordId_exact', 'TargetingId_exact'], inplace=True, errors='ignore')
+        
+        # SYNC: Update Recommendation objects with the found IDs and re-validate
+        if 'recommendation' in neg_df.columns:
+            def update_and_revalidate(row):
+                rec = row['recommendation']
+                if not isinstance(rec, OptimizationRecommendation):
+                    return rec
+                
+                # Update IDs from mapped columns
+                rec.campaign_id = row.get('CampaignId', rec.campaign_id)
+                rec.ad_group_id = row.get('AdGroupId', rec.ad_group_id)
+                rec.keyword_id = row.get('KeywordId', None)
+                rec.targeting_id = row.get('TargetingId', None)
+                
+                # Re-validate now that we have more ID info
+                rec.validation_result = validate_recommendation(rec)
+                return rec
+                
+            neg_df['recommendation'] = neg_df.apply(update_and_revalidate, axis=1)
     
     # Split into keywords vs product targets
     neg_kw = neg_df[~neg_df["Is_ASIN"]].copy()
@@ -1080,7 +1141,7 @@ def _process_bucket(segment_df: pd.DataFrame, config: dict, min_clicks: int, buc
     agg_cols = {"Clicks": "sum", "Spend": "sum", "Sales": "sum", "Impressions": "sum", "Orders": "sum"}
     meta_cols = {c: "first" for c in [
         "Campaign Name", "Ad Group Name", "CampaignId", "AdGroupId", 
-        "KeywordId", "TargetingId", "Match Type", "Targeting"
+        "KeywordId", "TargetingId", "Match Type", "Targeting", "Campaign Targeting Type"
     ] if c in segment_df.columns}
     
     if "Current Bid" in segment_df.columns:
@@ -1175,8 +1236,46 @@ def _process_bucket(segment_df: pd.DataFrame, config: dict, min_clicks: int, buc
     opt_results = grouped.apply(apply_optimization, axis=1)
     grouped["New Bid"] = opt_results.apply(lambda x: x[0])
     grouped["Reason"] = opt_results.apply(lambda x: x[1])
-    grouped["Decision_Basis"] = opt_results.apply(lambda x: x[2])
     grouped["Bucket"] = bucket_name
+    
+    # SYNC: Create recommendation objects for validation
+    if not grouped.empty:
+        def create_bid_rec(row):
+            rec_id = f"bid_{row['Campaign Name']}_{row['Ad Group Name']}_{row['Targeting']}"
+            
+            # Determine recommendation type
+            new_bid = row['New Bid']
+            current_bid = row.get('Current Bid', 0)
+            
+            rec_type = RecommendationType.BID_INCREASE if new_bid > current_bid else RecommendationType.BID_DECREASE
+            if new_bid == current_bid:
+                # No change, but still create for validation check if desired
+                # Actually, only validate if it's an actionable change
+                if row['Decision_Basis'] == "Hold (Insufficient Data)" or row['Decision_Basis'] == "Hold (No Data)":
+                    return None
+            
+            # Determine if this is PT or Keyword based on bucket
+            is_pt = row['Bucket'] in ["Product Targeting", "Auto"]
+            
+            rec = OptimizationRecommendation(
+                recommendation_id=rec_id,
+                recommendation_type=rec_type,
+                campaign_name=row['Campaign Name'],
+                campaign_id=row.get('CampaignId', ""),
+                campaign_targeting_type=row.get('Campaign Targeting Type', "Manual"),
+                ad_group_name=row['Ad Group Name'],
+                ad_group_id=row.get('AdGroupId', ""),
+                keyword_text=row['Targeting'] if not is_pt else None,
+                product_targeting_expression=row['Targeting'] if is_pt else None,
+                match_type=row['Match Type'],
+                current_bid=float(current_bid) if pd.notna(current_bid) else 0.0,
+                new_bid=float(new_bid),
+                currency=config.get("currency", "AED")
+            )
+            rec.validation_result = validate_recommendation(rec)
+            return rec
+            
+        grouped['recommendation'] = grouped.apply(create_bid_rec, axis=1)
     
     return grouped
 
@@ -2398,6 +2497,34 @@ class OptimizerModule(BaseFeature):
             if total_harvests > 0:
                 st.info(f"🌱 **{total_harvests}** harvest candidates - Review in Harvest tab")
 
+    def _extract_validation_info(self, df):
+        """Extract status icon and issues from recommendation objects in DataFrame."""
+        if df.empty or 'recommendation' not in df.columns:
+            return df
+            
+        df = df.copy()
+        def get_status(rec):
+            if not isinstance(rec, OptimizationRecommendation):
+                return "✅"
+            return rec.get_status_icon()
+            
+        def get_issues(rec):
+            if not isinstance(rec, OptimizationRecommendation):
+                return ""
+            all_msgs = []
+            if rec.errors:
+                all_msgs.extend([e['message'] for e in rec.errors])
+            if rec.warnings:
+                all_msgs.extend([w['message'] for w in rec.warnings])
+            return "; ".join(all_msgs)
+            
+        df['Status'] = df['recommendation'].apply(get_status)
+        df['Validation Issues'] = df['recommendation'].apply(get_issues)
+        
+        # Ensure Status is at the front
+        cols = ['Status'] + [c for c in df.columns if c not in ['Status', 'recommendation']]
+        return df[cols]
+
     def _display_negatives(self, neg_kw, neg_pt):
         # Icons
         icon_color = "#8F8CA3"
@@ -2444,19 +2571,21 @@ class OptimizerModule(BaseFeature):
         if active_tab == "Keyword Negatives":
             tab_header("Negative Keywords Identified", shield_icon)
             if not neg_kw.empty:
-                cols = list(neg_kw.columns)
+                neg_kw_ui = self._extract_validation_info(neg_kw)
+                cols = list(neg_kw_ui.columns)
                 if not st.session_state.get("opt_show_ids", False):
-                    cols = [c for c in cols if "Id" not in c and "Basis" not in c]
-                st.data_editor(neg_kw[cols], use_container_width=True, height=400, disabled=True, hide_index=True)
+                    cols = [c for c in cols if "Id" not in c and "Basis" not in c and "Validation Issues" not in c]
+                st.data_editor(neg_kw_ui[cols], use_container_width=True, height=400, disabled=True, hide_index=True)
             else:
                 st.info("No negative keywords found.")
         else:
             tab_header("Product Targeting Candidates", shield_icon)
             if not neg_pt.empty:
-                cols = list(neg_pt.columns)
+                neg_pt_ui = self._extract_validation_info(neg_pt)
+                cols = list(neg_pt_ui.columns)
                 if not st.session_state.get("opt_show_ids", False):
-                    cols = [c for c in cols if "Id" not in c and "Basis" not in c]
-                st.data_editor(neg_pt[cols], use_container_width=True, height=400, disabled=True, hide_index=True)
+                    cols = [c for c in cols if "Id" not in c and "Basis" not in c and "Validation Issues" not in c]
+                st.data_editor(neg_pt_ui[cols], use_container_width=True, height=400, disabled=True, hide_index=True)
             else:
                 st.info("No product targeting negatives found.")
 
@@ -2510,8 +2639,11 @@ class OptimizerModule(BaseFeature):
         
         def safe_display(df):
             if df is not None and not df.empty:
-                available_cols = [c for c in preferred_cols if c in df.columns]
-                st.data_editor(df[available_cols], use_container_width=True, height=400, disabled=True, hide_index=True)
+                df_ui = self._extract_validation_info(df)
+                display_cols = ["Status"] + [c for c in preferred_cols if c in df_ui.columns]
+                if st.session_state.get("opt_show_ids", False):
+                     display_cols.append("Validation Issues")
+                st.data_editor(df_ui[display_cols], use_container_width=True, height=400, disabled=True, hide_index=True)
             else:
                 st.info("No bid adjustments needed for this bucket.")
 
@@ -2746,6 +2878,38 @@ class OptimizerModule(BaseFeature):
         else:
             st.info("No heatmap data available.")
 
+    def _group_issues(self, issues):
+        """Aggregate identical issues to prevent UI clutter."""
+        if not issues:
+            return []
+        
+        # Filter out "row: -1" which are already summary issues from the validator
+        summaries = [i for i in issues if i.get('row') == -1]
+        row_issues = [i for i in issues if i.get('row') != -1]
+        
+        grouped = {}
+        for issue in row_issues:
+            rule = issue.get('rule') or issue.get('code', 'UNKNOWN')
+            msg = issue.get('msg') or issue.get('message', '')
+            severity = issue.get('severity', 'warning')
+            
+            key = (rule, msg, severity)
+            if key not in grouped:
+                grouped[key] = 0
+            grouped[key] += 1
+            
+        result = summaries.copy()
+        for (rule, msg, severity), count in grouped.items():
+            if count > 1:
+                display_msg = f"{count} rows affected: {msg}"
+            else:
+                # If only one row, try to include the row number if available
+                row_num = row_issues[0].get('row', '') # This is a bit lazy but fine for 1 item
+                display_msg = msg
+                
+            result.append({'rule': rule, 'msg': display_msg, 'severity': severity})
+        return result
+
     def _display_downloads(self, results):
         icon_color = "#8F8CA3"
         dl_icon = f'<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="{icon_color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 8px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>'
@@ -2766,9 +2930,27 @@ class OptimizerModule(BaseFeature):
         
         st.markdown("""
         <p style="color: #B6B4C2; font-size: 0.95rem; margin-bottom: 24px;">
-            Download formatted Amazon Bulk Files to apply these optimizations instantly.
+            Download formatted Amazon Bulk Files to apply these optimizations instantly. Only valid and actionable records are included.
         </p>
         """, unsafe_allow_html=True)
+        
+        # --- VALIDATION SUMMARY ---
+        all_recs = []
+        for df_name in ["neg_kw", "neg_pt", "bids_exact", "bids_pt", "bids_agg", "bids_auto"]:
+            df = results.get(df_name)
+            if df is not None and 'recommendation' in df.columns:
+                all_recs.extend(df['recommendation'].dropna().tolist())
+        
+        if all_recs:
+            valid_count = len([r for r in all_recs if r.is_valid and not r.warnings])
+            warning_count = len([r for r in all_recs if r.is_valid and r.warnings])
+            blocked_count = len([r for r in all_recs if not r.is_valid])
+            
+            c1, c2, c3 = st.columns(3)
+            with c1: st.metric("Valid (Ready)", valid_count)
+            with c2: st.metric("Review (Warnings)", warning_count)
+            with c3: st.metric("Blocked (Invalid)", blocked_count)
+            st.divider()
         
         # 1. Negative Keywords + PT (combined)
         neg_kw = results.get("neg_kw", pd.DataFrame())
@@ -2780,33 +2962,18 @@ class OptimizerModule(BaseFeature):
             st.markdown(f"<div style='color: #F5F5F7; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center;'>{shield_icon_sub}Negative Keywords Bulk</div>", unsafe_allow_html=True)
             kw_bulk, kw_issues = generate_negatives_bulk(neg_kw, neg_pt)
             
-            # Calculate usability % - requires Campaign Id, Ad Group Id, AND entity-specific ID
+            # Calculate counts for display
             total_rows = len(kw_bulk)
             if total_rows > 0:
-                # For negatives: need Campaign Id + Ad Group Id + (Keyword Id OR PT Id)
-                has_campaign = kw_bulk["Campaign Id"].notna() & (kw_bulk["Campaign Id"] != "")
-                has_adgroup = kw_bulk["Ad Group Id"].notna() & (kw_bulk["Ad Group Id"] != "")
-                has_kwid = kw_bulk["Keyword Id"].notna() & (kw_bulk["Keyword Id"] != "")
-                has_ptid = kw_bulk["Product Targeting Id"].notna() & (kw_bulk["Product Targeting Id"] != "")
-                has_entity_id = has_kwid | has_ptid
-                
-                complete_rows = len(kw_bulk[has_campaign & has_adgroup & has_entity_id])
-                usability_pct = (complete_rows / total_rows) * 100
-                
-                # Color based on usability
-                if usability_pct >= 90:
-                    color = "#30D158"  # Green
-                elif usability_pct >= 70:
-                    color = "#FFD60A"  # Yellow
-                else:
-                    color = "#FF453A"  # Red
-                
-                st.markdown(f"<div style='color: {color}; font-size: 14px; margin-bottom: 8px;'>📊 <b>{usability_pct:.0f}%</b> complete ({complete_rows}/{total_rows} rows have Campaign + Ad Group + Entity IDs)</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='color: #30D158; font-size: 14px; margin-bottom: 8px;'>✅ <b>{total_rows}</b> valid negative records ready for export</div>", unsafe_allow_html=True)
+            else:
+                st.markdown(f"<div style='color: #FF453A; font-size: 14px; margin-bottom: 8px;'>❌ <b>0</b> valid negative records available</div>", unsafe_allow_html=True)
             
-            # Display validation warnings
+            # Display validation warnings (grouped)
             if kw_issues:
-                with st.expander(f"⚠️ {len(kw_issues)} Validation Issues", expanded=False):
-                    for issue in kw_issues:
+                grouped_kw = self._group_issues(kw_issues)
+                with st.expander(f"⚠️ {len(kw_issues)} Validation Issues ({len(grouped_kw)} types)", expanded=False):
+                    for issue in grouped_kw:
                         rule = issue.get('rule') or issue.get('code', 'UNKNOWN')
                         msg = issue.get('msg') or issue.get('message', '')
                         severity = issue.get('severity', 'warning')
@@ -2826,7 +2993,8 @@ class OptimizerModule(BaseFeature):
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="dl_neg_btn",
                 type="primary",
-                use_container_width=True
+                use_container_width=True,
+                disabled=(total_rows == 0)
             )
             st.markdown("<br>", unsafe_allow_html=True)
 
@@ -2837,31 +3005,18 @@ class OptimizerModule(BaseFeature):
             st.markdown(f"<div style='color: #F5F5F7; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center;'>{sliders_icon_sub}Bid Optimizations Bulk</div>", unsafe_allow_html=True)
             bid_bulk, bid_issues = generate_bids_bulk(all_bids)
             
-            # Calculate usability %
+            # Calculate counts
             total_rows = len(bid_bulk)
             if total_rows > 0:
-                # For bids, check Campaign Id + entity-specific ID
-                complete_rows = len(bid_bulk[
-                    (bid_bulk["Campaign Id"].notna() & (bid_bulk["Campaign Id"] != "")) &
-                    ((bid_bulk["Keyword Id"].notna() & (bid_bulk["Keyword Id"] != "")) | 
-                     (bid_bulk["Product Targeting Id"].notna() & (bid_bulk["Product Targeting Id"] != "")))
-                ])
-                usability_pct = (complete_rows / total_rows) * 100
-                
-                # Color based on usability
-                if usability_pct >= 90:
-                    color = "#30D158"  # Green
-                elif usability_pct >= 70:
-                    color = "#FFD60A"  # Yellow
-                else:
-                    color = "#FF453A"  # Red
-                
-                st.markdown(f"<div style='color: {color}; font-size: 14px; margin-bottom: 8px;'>📊 <b>{usability_pct:.0f}%</b> of rows have complete IDs ({complete_rows}/{total_rows})</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='color: #30D158; font-size: 14px; margin-bottom: 8px;'>✅ <b>{total_rows}</b> valid bid updates ready for export</div>", unsafe_allow_html=True)
+            else:
+                st.markdown(f"<div style='color: #FF453A; font-size: 14px; margin-bottom: 8px;'>❌ <b>0</b> valid bid updates available</div>", unsafe_allow_html=True)
             
-            # Display bid validation warnings
+            # Display bid validation warnings (grouped)
             if bid_issues:
-                with st.expander(f"⚠️ {len(bid_issues)} Validation Issues", expanded=False):
-                    for issue in bid_issues:
+                grouped_bid = self._group_issues(bid_issues)
+                with st.expander(f"⚠️ {len(bid_issues)} Validation Issues ({len(grouped_bid)} types)", expanded=False):
+                    for issue in grouped_bid:
                         rule = issue.get('rule') or issue.get('code', 'UNKNOWN')
                         msg = issue.get('msg') or issue.get('message', '')
                         severity = issue.get('severity', 'warning')
@@ -2881,7 +3036,8 @@ class OptimizerModule(BaseFeature):
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="dl_bid_btn",
                 type="primary",
-                use_container_width=True
+                use_container_width=True,
+                disabled=(total_rows == 0)
             )
             st.markdown("<br>", unsafe_allow_html=True)
 

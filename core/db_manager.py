@@ -46,6 +46,11 @@ class DatabaseManager:
         # Initialize schema
         self._init_schema()
     
+    @property
+    def placeholder(self) -> str:
+        """SQL parameter placeholder for SQLite."""
+        return "?"
+    
     @contextmanager
     def _get_connection(self):
         """Context manager for safe database connections."""

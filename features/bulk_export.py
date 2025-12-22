@@ -27,6 +27,9 @@ from core.bulk_validation import (
     ERROR_MESSAGES,
 )
 
+from bulk_validation_spec import OptimizationRecommendation
+
+
 # ==========================================
 # AMAZON BULK FILE SCHEMA
 # ==========================================
@@ -242,10 +245,31 @@ def is_asin(term: str) -> bool:
 def is_product_targeting(term: str) -> bool:
     """Check if term is a product targeting expression."""
     term_lower = str(term).lower().strip()
+    AUTO_TARGETS = {'close-match', 'substitutes', 'loose-match', 'complements', 'auto'}
     return (term_lower.startswith('asin=') or 
             term_lower.startswith('asin-expanded=') or
             term_lower.startswith('category=') or
+            term_lower.startswith('keyword-group=') or
+            term_lower in AUTO_TARGETS or
             is_asin(term))
+
+def clean_id(val) -> str:
+    """Format ID as clean integer string, removing .0 decimals."""
+    if pd.isna(val) or val is None or str(val).strip() == "" or str(val).lower() == "none":
+        return ""
+    try:
+        # Convert to float first to handle potential strings like "1.23e+10"
+        # then to int, then to str
+        f_val = float(val)
+        if f_val == 0:
+            return ""
+        return str(int(f_val))
+    except (ValueError, TypeError):
+        # Fallback to string stripping .0 if it exists
+        s_val = str(val).strip()
+        if s_val.endswith(".0"):
+            return s_val[:-2]
+        return s_val
 
 
 # ==========================================
@@ -266,6 +290,10 @@ def generate_negatives_bulk(neg_kw: pd.DataFrame, neg_pt: pd.DataFrame) -> pd.Da
     frames = []
     
     if neg_kw is not None and not neg_kw.empty:
+        # VALIDATE-AT-SOURCE: Filter to only executable recommendations
+        if 'recommendation' in neg_kw.columns:
+            neg_kw = neg_kw[neg_kw['recommendation'].apply(lambda x: x.can_execute if isinstance(x, OptimizationRecommendation) else True)]
+            
         neg_kw = neg_kw.reset_index(drop=True)
         # Initialize with index so scalar assignments work
         df = pd.DataFrame(index=neg_kw.index, columns=EXPORT_COLUMNS)
@@ -273,18 +301,23 @@ def generate_negatives_bulk(neg_kw: pd.DataFrame, neg_pt: pd.DataFrame) -> pd.Da
         df["Product"] = "Sponsored Products"
         df["Entity"] = "Negative Keyword"
         df["Operation"] = "Create"
-        df["Campaign Id"] = neg_kw.get("CampaignId", "")
-        df["Ad Group Id"] = neg_kw.get("AdGroupId", "")
+        df["Campaign Id"] = neg_kw.get("CampaignId", "").apply(clean_id)
+        df["Ad Group Id"] = neg_kw.get("AdGroupId", "").apply(clean_id)
         df["Campaign Name"] = neg_kw["Campaign Name"]
         df["Ad Group Name"] = neg_kw["Ad Group Name"]
         # Strip any targeting prefixes from the term
         df["Keyword Text"] = neg_kw["Term"].apply(strip_targeting_prefix)
         df["Match Type"] = "negativeExact"
-        df["Keyword Id"] = neg_kw.get("KeywordId", "")
+        df["Keyword Id"] = neg_kw.get("KeywordId", "").apply(clean_id)
+        df["Product Targeting Id"] = "" # STRICT EXCLUSIVITY
         df["State"] = "enabled"
         frames.append(df)
         
     if neg_pt is not None and not neg_pt.empty:
+        # VALIDATE-AT-SOURCE: Filter to only executable recommendations
+        if 'recommendation' in neg_pt.columns:
+            neg_pt = neg_pt[neg_pt['recommendation'].apply(lambda x: x.can_execute if isinstance(x, OptimizationRecommendation) else True)]
+            
         neg_pt = neg_pt.reset_index(drop=True)
         # Initialize with index
         df = pd.DataFrame(index=neg_pt.index, columns=EXPORT_COLUMNS)
@@ -292,8 +325,8 @@ def generate_negatives_bulk(neg_kw: pd.DataFrame, neg_pt: pd.DataFrame) -> pd.Da
         df["Product"] = "Sponsored Products"
         df["Entity"] = "Negative Product Targeting"
         df["Operation"] = "Create"
-        df["Campaign Id"] = neg_pt.get("CampaignId", "")
-        df["Ad Group Id"] = neg_pt.get("AdGroupId", "")
+        df["Campaign Id"] = neg_pt.get("CampaignId", "").apply(clean_id)
+        df["Ad Group Id"] = neg_pt.get("AdGroupId", "").apply(clean_id)
         df["Campaign Name"] = neg_pt["Campaign Name"]
         df["Ad Group Name"] = neg_pt["Ad Group Name"]
         # For PT, format as asin="ASIN" expression
@@ -301,7 +334,8 @@ def generate_negatives_bulk(neg_kw: pd.DataFrame, neg_pt: pd.DataFrame) -> pd.Da
             lambda x: f'asin="{strip_targeting_prefix(x)}"' if is_asin(strip_targeting_prefix(x)) else x
         )
         df["Match Type"] = ""  # PT should have blank match type per R2
-        df["Product Targeting Id"] = neg_pt.get("TargetingId", "")
+        df["Keyword Id"] = "" # STRICT EXCLUSIVITY
+        df["Product Targeting Id"] = neg_pt.get("TargetingId", "").apply(clean_id)
         df["State"] = "enabled"
         frames.append(df)
         
@@ -324,21 +358,28 @@ def generate_bids_bulk(bids_df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
         Tuple of (bulk DataFrame, count of changes)
     """
     if bids_df is None or bids_df.empty:
-        return pd.DataFrame(columns=EXPORT_COLUMNS), 0
+        return pd.DataFrame(columns=EXPORT_COLUMNS), []
         
     # Filter for actually changed bids (exclude holds)
     changes = bids_df[~bids_df["Reason"].str.contains("Hold", case=False, na=False)].copy()
-    if changes.empty:
-        return pd.DataFrame(columns=EXPORT_COLUMNS), 0
+    if changes is None or changes.empty:
+        return pd.DataFrame(columns=EXPORT_COLUMNS), []
     
+    # VALIDATE-AT-SOURCE: Filter to only executable recommendations
+    if 'recommendation' in changes.columns:
+        changes = changes[changes['recommendation'].apply(lambda x: x.can_execute if isinstance(x, OptimizationRecommendation) else True)]
+        
+    if changes.empty:
+        return pd.DataFrame(columns=EXPORT_COLUMNS), []
+        
     changes = changes.reset_index(drop=True)
     # Initialize with index to allow scalar assignment
     df = pd.DataFrame(index=changes.index, columns=EXPORT_COLUMNS)
     
     df["Product"] = "Sponsored Products"
     df["Operation"] = "Update"
-    df["Campaign Id"] = changes.get("CampaignId", "")
-    df["Ad Group Id"] = changes.get("AdGroupId", "")
+    df["Campaign Id"] = changes.get("CampaignId", "").apply(clean_id)
+    df["Ad Group Id"] = changes.get("AdGroupId", "").apply(clean_id)
     df["Campaign Name"] = changes["Campaign Name"]
     df["Ad Group Name"] = changes["Ad Group Name"]
     df["Bid"] = changes["New Bid"]
@@ -377,9 +418,16 @@ def generate_bids_bulk(bids_df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     # For keywords, put Match Type. For PT, leave blank
     df["Match Type"] = np.where(df["Entity"] == "Keyword", details[2], "")
     
-    # ID Mapping
-    df["Keyword Id"] = changes.get("KeywordId", "")
-    df["Product Targeting Id"] = changes.get("TargetingId", "")
+    # CRITICAL: If Match Type is provided (Keyword), Product Targeting Expression MUST be blank
+    df["Product Targeting Expression"] = np.where(df["Match Type"] != "", "", df["Product Targeting Expression"])
+    
+    # ID Mapping with Clean Format & Strict Exclusivity
+    df["Keyword Id"] = changes.get("KeywordId", "").apply(clean_id)
+    df["Product Targeting Id"] = changes.get("TargetingId", "").apply(clean_id)
+    
+    # Enforce Mutual Exclusivity based on entity
+    df["Keyword Id"] = np.where(df["Entity"] == "Keyword", df["Keyword Id"], "")
+    df["Product Targeting Id"] = np.where(df["Entity"] == "Product Targeting", df["Product Targeting Id"], "")
     
     # Run bid validation
     validated_df, result = validate_bulk_export(df, export_type="bids", currency="AED")
