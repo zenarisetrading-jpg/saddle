@@ -51,6 +51,9 @@ from core.db_manager import DatabaseManager, get_db_manager
 from features.impact_dashboard import render_impact_dashboard, render_reference_data_badge
 from pathlib import Path
 
+# === AUTHENTICATION ===
+from auth import require_authentication, render_user_menu
+
 # ==========================================
 # PAGE CONFIGURATION
 # ==========================================
@@ -555,6 +558,10 @@ def run_consolidated_optimizer():
 def main():
     setup_page()
     
+    # === AUTHENTICATION GATE ===
+    # Shows login page if not authenticated, blocks access to main app
+    user = require_authentication()
+    
     # Simplified V4 Sidebar - Remove Feature Breakdown since they are tabs now
     with st.sidebar:
         # Sidebar Logo at TOP (theme-aware, prominent)
@@ -579,6 +586,9 @@ def main():
         # Consolidation: render_account_selector used to have its own line, 
         # now callers handle it. 
         st.markdown("---")
+        
+        # User menu (logout, account settings)
+        render_user_menu()
         
         if st.button("Home", use_container_width=True):
             st.session_state['current_module'] = 'home'

@@ -30,6 +30,9 @@ from utils.formatters import format_currency
 from core.data_loader import safe_numeric
 from pathlib import Path
 
+# === AUTHENTICATION ===
+from auth import require_authentication, render_user_menu
+
 # Global dark theme CSS for sidebar buttons
 st.markdown("""
 <style>
@@ -754,7 +757,20 @@ def run_consolidated_optimizer():
 def main():
     setup_page()
     
-    # Simplified V4 Sidebar - Remove Feature Breakdown since they are tabs now
+    # === AUTHENTICATION GATE ===
+    # Shows login page if not authenticated, blocks access to main app
+    user = require_authentication()
+    
+    # === DATABASE INITIALIZATION ===
+    # Initialize db_manager right after auth, before any UI that needs it
+    if st.session_state.get('db_manager') is None:
+        st.session_state['db_manager'] = get_db_manager(st.session_state.get('test_mode', False))
+    
+    # === TOP-RIGHT HEADER (Profile, Account, Logout) ===
+    # This renders a fixed-position header component
+    render_user_menu()
+    
+    # Simplified V4 Sidebar
     with st.sidebar:
         # Sidebar Logo at TOP (theme-aware, prominent)
         import base64
@@ -771,12 +787,19 @@ def main():
                 unsafe_allow_html=True
             )
         
-        # Account Selector
+        # Account selector (right after logo)
         from ui.account_manager import render_account_selector
         render_account_selector()
         
-        # Consolidation: render_account_selector used to have its own line, 
-        # now callers handle it. 
+        # Logout button (compact)
+        from auth.service import AuthService
+        auth = AuthService()
+        if st.button("⏻ Logout", key="sidebar_logout", use_container_width=True, help="Sign out"):
+            auth.sign_out()
+            st.rerun()
+        
+        st.divider()
+        
         # =========================
         # PRIMARY NAVIGATION
         # =========================
@@ -791,6 +814,7 @@ def main():
         rocket_icon = f'<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="{nav_icon_color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"></path><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"></path><path d="m9 12 2.5 2.5"></path></svg>'
         storage_icon = f'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{nav_icon_color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M21 20V4a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v16"></path><rect x="3" y="4" width="18" height="4" rx="2"></rect><rect x="3" y="12" width="18" height="4" rx="2"></rect></svg>'
         help_icon = f'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{nav_icon_color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>'
+        settings_icon = f'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{nav_icon_color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>'
 
         # Stylized nav button with CSS injection for hover effects and integrated SVG
         st.markdown(f"""
@@ -918,9 +942,10 @@ def main():
         # SECONDARY / SYSTEM
         # =========================
         nav_button_chiclet("Data Setup", storage_icon, "data_hub")
+        nav_button_chiclet("Account Settings", settings_icon, "account_settings")
         nav_button_chiclet("Help", help_icon, "readme")
         
-        # Theme Toggle at BOTTOM
+        # Theme Toggle (logout moved to top header)
         st.divider()
         from ui.theme import ThemeManager
         ThemeManager.render_toggle()
@@ -957,6 +982,10 @@ def main():
     elif current == 'data_hub':
         from ui.data_hub import render_data_hub
         render_data_hub()
+    
+    elif current == 'account_settings':
+        from features.account_settings import run_account_settings
+        run_account_settings()
         
     elif current == 'readme':
         from ui.readme import render_readme
