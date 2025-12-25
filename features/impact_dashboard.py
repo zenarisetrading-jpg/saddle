@@ -512,6 +512,7 @@ def _render_hero_tiles(summary: Dict[str, Any], active_count: int = 0, dormant_c
         st.markdown(f"""
         <div class="hero-card">
             <div class="hero-label">{roas_icon} ROAS Lift</div>
+            <div style="font-size: 0.7rem; color: #94a3b8; margin-top: -8px; margin-bottom: 8px; line-height: 1.1;">Shows the lift beyond your normal performance baseline</div>
             <div class="hero-value" style="color: {roas_color};">{prefix}{roas_lift:.1f}%</div>
             <div class="hero-sub">{sig_icon} {'significant' if is_sig else 'not significant'}</div>
         </div>
