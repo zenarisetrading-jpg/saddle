@@ -1195,9 +1195,10 @@ def get_recent_impact_summary() -> Optional[dict]:
         # USE CACHED DATA FETCHER
         test_mode = st.session_state.get('test_mode', False)
         # Use data upload timestamp as cache version
-        cv = str(st.session_state.get('data_upload_timestamp', 'v1'))
-        # Use 30-day window for measurement to align with "Net Change Last 30 Days" label
-        impact_df, _ = _fetch_impact_data(selected_client, test_mode, window_days=30, cache_version=cv)
+        # Use 7-day window to CAPTURE recent actions (SQL excludes actions inside the window),
+        # then scale to 30 days to estimate full monthly impact.
+        # If we use window_days=30, it excludes all actions from the last 29 days -> Blank Tile.
+        impact_df, _ = _fetch_impact_data(selected_client, test_mode, window_days=7, cache_version=cv)
         
         if impact_df.empty:
             return None
@@ -1230,8 +1231,11 @@ def get_recent_impact_summary() -> Optional[dict]:
         impact_col = 'impact_score' if 'impact_score' in active_df.columns else 'delta_sales'
         spend_col = 'delta_spend' if 'delta_spend' in active_df.columns else 'delta_spend'
         
-        impact_scores = active_df[impact_col].fillna(0)
-        delta_spend = active_df[spend_col].fillna(0)
+        # SCALE 7-DAY IMPACT TO 30 DAYS
+        # Since we measure over 7 days, we project the 30-day run rate
+        scale_factor = 30 / 7
+        impact_scores = active_df[impact_col].fillna(0) * scale_factor
+        delta_spend = active_df[spend_col].fillna(0) * scale_factor
         is_winner = active_df['is_winner'].fillna(False)
         active_count = len(active_df)
         
