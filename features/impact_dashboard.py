@@ -1203,17 +1203,17 @@ def get_recent_impact_summary() -> Optional[dict]:
         if impact_df.empty:
             return None
             
-        # Get available dates (fast, usually cached internally by DB manager if needed, but cheap query)
-        available_dates = db_manager.get_available_dates(selected_client)
-        if not available_dates:
-            return None
-        
-        # Apply 30D filter with upper bound for stability (same as Impact tab)
+        # Determine latest date directly from data to avoid cache mis-syncs with db_manager.get_available_dates
         impact_df['action_date_dt'] = pd.to_datetime(impact_df['action_date'], errors='coerce')
-        latest_data_date = pd.to_datetime(available_dates[0])
+        
+        valid_dates = impact_df['action_date_dt'].dropna()
+        if valid_dates.empty:
+            return None
+            
+        latest_data_date = valid_dates.max()
         cutoff_date = latest_data_date - timedelta(days=30)
         
-        # Ensure we only include actions that occurred AT OR BEFORE the latest data date
+        # Ensure we only include actions that occurred AT OR BEFORE the latest data date (and within 30 days)
         impact_df = impact_df[(impact_df['action_date_dt'] >= cutoff_date) & 
                              (impact_df['action_date_dt'] <= latest_data_date)].copy()
         
